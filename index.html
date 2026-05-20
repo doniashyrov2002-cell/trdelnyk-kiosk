@@ -6,6 +6,7 @@
 <title>Trendo</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap');
 :root {
@@ -279,7 +280,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
     <div class="stat-card"><div class="sv" id="stOrders">0</div><div class="sl">заказов</div></div>
     <div class="stat-card"><div class="sv" id="stRevenue">0</div><div class="sl">сум</div></div>
     <div class="stat-card"><div class="sv" id="stOpen">0</div><div class="sl">открытых</div></div>
-    <div class="stat-card"><div class="sv" id="stDate">—</div><div class="sl">сегодня</div></div>
+    <div class="stat-card"><div class="sv" id="stDate">—</div><div class="sl">раб. день</div></div>
   </div>
 </div>
 
@@ -351,7 +352,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 
 <!-- HISTORY PAGE -->
 <div class="view" id="page-history">
-  <div class="section-label">Оплата сегодня</div>
+  <div class="section-label">Оплата за рабочий день</div>
   <div class="pay-summary">
     <div class="ps-card"><div class="ps-val" id="hCash">0</div><div class="ps-lbl">💵 Нал</div></div>
     <div class="ps-card"><div class="ps-val" id="hCard">0</div><div class="ps-lbl">💳 Карта</div></div>
@@ -429,7 +430,12 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);min
 <div class="overlay" id="dayCloseOverlay">
   <div class="modal">
     <div class="modal-handle"></div>
-    <div class="modal-title">🌙 Итоги дня</div>
+    <div class="modal-title">🌙 Рабочий день</div>
+    <div class="dcs-card" id="workDayStatus"></div>
+    <div class="action-row" id="workDayActions" style="margin-bottom:12px">
+      <button class="btn btn-accent" id="startDayBtn" onclick="startWorkDay()">☀️ Начать день</button>
+      <button class="btn btn-warn" id="finishDayBtn" onclick="finishWorkDay()">🌙 Завершить день</button>
+    </div>
     <div class="dcs-card" id="dcsSummary"></div>
     <div class="section-label">Расходы</div>
     <div id="expensesList"></div>
@@ -484,12 +490,14 @@ const CAT = { all:'Все', trdelnyk:'🥐 Трдельник', drinks:'☕ На
 const ORDER_COLORS = ['clr-0','clr-1','clr-2','clr-3','clr-4','clr-5'];
 const ORDER_NAMES = ['Терракот','Синий','Зелёный','Абрикос','Лаванда','Бирюза'];
 const PALETTE = ['#c9664a','#6b8cba','#8b9e6e','#d4956a','#9b7ec8','#5ba8a0'];
+const WORKDAY_KEY = 'trendo_active_work_day_v1';
 
 let S = {
   products: [], cart: {}, payType: 'cash', splitOn: false,
   openOrders: [], closedOrders: [],
   orderCounter: 0, currentCat: 'all',
   seller: null, sellerLabel: null,
+  workDay: null,
 };
 let dayExpenses = [];
 let editingPid = null;
@@ -500,10 +508,60 @@ let atoCat = 'all';
 let currentPage = 'sale';
 let realtimeSub = null;
 
-function todayStr() { return new Date().toISOString().slice(0,10); }
+function todayStr() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 function timeStr() { return new Date().toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'}); }
 function fmtN(n) { return Math.round(n||0).toLocaleString('ru'); }
 function haptic() { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light'); }
+
+function parseLocalDate(ds) {
+  const [y,m,d] = String(ds || '').split('-').map(Number);
+  return y && m && d ? new Date(y, m - 1, d) : null;
+}
+function fmtDateHuman(ds) {
+  const d = parseLocalDate(ds);
+  return d ? d.toLocaleDateString('ru',{day:'numeric',month:'short'}) : '—';
+}
+function fmtDateTimeHuman(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('ru',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+}
+function loadWorkDayState() {
+  try {
+    const raw = localStorage.getItem(WORKDAY_KEY);
+    S.workDay = raw ? JSON.parse(raw) : null;
+    if (!S.workDay || !S.workDay.id) S.workDay = null;
+  } catch(e) {
+    S.workDay = null;
+  }
+}
+function saveWorkDayState() {
+  if (S.workDay?.id) localStorage.setItem(WORKDAY_KEY, JSON.stringify(S.workDay));
+}
+function clearWorkDayState() {
+  S.workDay = null;
+  localStorage.removeItem(WORKDAY_KEY);
+}
+function hasWorkDay() { return !!S.workDay?.id; }
+function workDayDate() { return S.workDay?.id || todayStr(); }
+function workDayLabel() { return hasWorkDay() ? fmtDateHuman(workDayDate()) : 'не начат'; }
+function ensureWorkDay() {
+  if (hasWorkDay()) return true;
+  toast('Сначала нажмите «Начать день»');
+  openDayClose();
+  return false;
+}
+function getClosedWorkOrders() {
+  const d = workDayDate();
+  return hasWorkDay() ? S.closedOrders.filter(o=>o.date===d) : [];
+}
 
 window.Telegram?.WebApp?.ready();
 window.Telegram?.WebApp?.expand();
@@ -514,6 +572,7 @@ window.Telegram?.WebApp?.expand();
 async function loadFromDB() {
   setSyncState('syncing');
   try {
+    loadWorkDayState();
     // Загружаем товары
     const { data: products } = await db.from('products').select('*').order('created_at');
     if (products && products.length) {
@@ -528,21 +587,30 @@ async function loadFromDB() {
       await insertDefaultProducts();
     }
 
-    // Загружаем заказы за сегодня
-    const { data: orders } = await db.from('orders')
-      .select('*').eq('date', todayStr()).order('created_at');
-    if (orders) {
-      S.closedOrders = orders.filter(o=>o.status==='closed').map(dbToOrder);
-      S.openOrders = orders.filter(o=>o.status==='open').map(dbToOrder);
+    // Загружаем заказы активного рабочего дня
+    if (hasWorkDay()) {
+      const { data: orders } = await db.from('orders')
+        .select('*').eq('date', workDayDate()).order('created_at');
+      if (orders) {
+        S.closedOrders = orders.filter(o=>o.status==='closed').map(dbToOrder);
+        S.openOrders = orders.filter(o=>o.status==='open').map(dbToOrder);
+      }
+    } else {
+      S.closedOrders = [];
+      S.openOrders = [];
     }
 
     // Счётчик заказов
     const { data: cnt } = await db.from('orders').select('num').order('num',{ascending:false}).limit(1);
     if (cnt && cnt.length) S.orderCounter = cnt[0].num;
 
-    // Расходы за сегодня
-    const { data: exp } = await db.from('expenses').select('*').eq('date', todayStr());
-    if (exp) dayExpenses = exp.map(e=>({id:e.id, type:e.type, name:e.name, amount:e.amount}));
+    // Расходы активного рабочего дня
+    if (hasWorkDay()) {
+      const { data: exp } = await db.from('expenses').select('*').eq('date', workDayDate());
+      if (exp) dayExpenses = exp.map(e=>({id:e.id, type:e.type, name:e.name, amount:e.amount}));
+    } else {
+      dayExpenses = [];
+    }
 
     setSyncState('ok');
     startRealtime();
@@ -594,7 +662,13 @@ function startRealtime() {
 }
 
 async function reloadOrders() {
-  const { data } = await db.from('orders').select('*').eq('date', todayStr()).order('created_at');
+  if (!hasWorkDay()) {
+    S.closedOrders = [];
+    S.openOrders = [];
+    renderAll();
+    return;
+  }
+  const { data } = await db.from('orders').select('*').eq('date', workDayDate()).order('created_at');
   if (data) {
     S.closedOrders = data.filter(o=>o.status==='closed').map(dbToOrder);
     S.openOrders = data.filter(o=>o.status==='open').map(dbToOrder);
@@ -602,6 +676,12 @@ async function reloadOrders() {
     if (cnt > S.orderCounter) S.orderCounter = cnt;
     renderAll();
   }
+}
+
+async function reloadExpenses() {
+  if (!hasWorkDay()) { dayExpenses = []; return; }
+  const { data } = await db.from('expenses').select('*').eq('date', workDayDate());
+  if (data) dayExpenses = data.map(e=>({id:e.id,type:e.type,name:e.name,amount:e.amount}));
 }
 
 async function reloadProducts() {
@@ -637,6 +717,7 @@ function chooseSeller(key, label) {
   document.getElementById('sellerDot').className = 'seller-dot sd-'+key;
   document.getElementById('sellerName').textContent = label;
   renderAll();
+  if (!hasWorkDay()) setTimeout(()=>openDayClose(),250);
 }
 
 function showPage(page) {
@@ -662,13 +743,12 @@ function renderAll() {
 }
 
 function renderHeader() {
-  const cl = S.closedOrders.filter(o=>o.date===todayStr());
+  const cl = getClosedWorkOrders();
   const rev = cl.reduce((s,o)=>s+o.total,0);
   document.getElementById('stOrders').textContent = cl.length;
   document.getElementById('stRevenue').textContent = fmtN(rev);
-  document.getElementById('stOpen').textContent = S.openOrders.length;
-  const d = new Date();
-  document.getElementById('stDate').textContent = d.toLocaleDateString('ru',{day:'numeric',month:'short'});
+  document.getElementById('stOpen').textContent = hasWorkDay() ? S.openOrders.length : 0;
+  document.getElementById('stDate').textContent = workDayLabel();
 }
 
 function updateBadges() {
@@ -789,12 +869,13 @@ function getSplitPayments() {
 
 async function closeOrder() {
   if(!S.seller){toast('Выберите продавца!');return;}
+  if(!ensureWorkDay()) return;
   if(!Object.entries(S.cart).filter(([,c])=>c>0).length){toast('Добавьте товары!');return;}
   S.orderCounter++;
   const ci=S.orderCounter%ORDER_COLORS.length;
   const payments=getSplitPayments();
   const total=calcTotal(S.cart);
-  const order={num:S.orderCounter, items:S.cart, total, payments, pay_type:S.payType, color_idx:ci, color_name:ORDER_NAMES[ci], time:timeStr(), date:todayStr(), seller:S.seller, seller_label:S.sellerLabel, status:'closed'};
+  const order={num:S.orderCounter, items:S.cart, total, payments, pay_type:S.payType, color_idx:ci, color_name:ORDER_NAMES[ci], time:timeStr(), date:workDayDate(), seller:S.seller, seller_label:S.sellerLabel, status:'closed'};
   setSyncState('syncing');
   const {data,error}=await db.from('orders').insert([order]).select();
   if(error){toast('Ошибка сохранения ❌','var(--accent)');setSyncState('error');S.orderCounter--;return;}
@@ -807,11 +888,12 @@ async function closeOrder() {
 
 async function holdOrder() {
   if(!S.seller){toast('Выберите продавца!');return;}
+  if(!ensureWorkDay()) return;
   if(!Object.entries(S.cart).filter(([,c])=>c>0).length){toast('Добавьте товары!');return;}
   S.orderCounter++;
   const ci=S.orderCounter%ORDER_COLORS.length;
   const total=calcTotal(S.cart);
-  const order={num:S.orderCounter, items:S.cart, total, payments:[{type:'open',amount:total}], pay_type:'open', color_idx:ci, color_name:ORDER_NAMES[ci], time:timeStr(), date:todayStr(), seller:S.seller, seller_label:S.sellerLabel, status:'open'};
+  const order={num:S.orderCounter, items:S.cart, total, payments:[{type:'open',amount:total}], pay_type:'open', color_idx:ci, color_name:ORDER_NAMES[ci], time:timeStr(), date:workDayDate(), seller:S.seller, seller_label:S.sellerLabel, status:'open'};
   setSyncState('syncing');
   const {data,error}=await db.from('orders').insert([order]).select();
   if(error){toast('Ошибка сохранения ❌','var(--accent)');setSyncState('error');S.orderCounter--;return;}
@@ -832,6 +914,7 @@ function resetCart() {
 // ══ OPEN ORDERS ══
 function renderOrders() {
   const list=document.getElementById('ordersList');
+  if(!hasWorkDay()){list.innerHTML='<div class="empty-state"><div class="ei">☀️</div><div class="et">Рабочий день не начат</div></div>';return;}
   if(!S.openOrders.length){list.innerHTML='<div class="empty-state"><div class="ei">📋</div><div class="et">Нет открытых заказов</div></div>';return;}
   list.innerHTML=S.openOrders.map(o=>{
     const items=Object.entries(o.items).filter(([,c])=>c>0).map(([k,cnt])=>{
@@ -905,7 +988,7 @@ async function cancelOpenOrder(oid) {
 
 // ══ HISTORY ══
 function renderHistory() {
-  const cl=S.closedOrders.filter(o=>o.date===todayStr()).slice().reverse();
+  const cl=getClosedWorkOrders().slice().reverse();
   const sumP=(t)=>cl.reduce((s,o)=>{
     return s+(o.payments||[{type:o.payType,amount:o.total}]).filter(p=>p.type===t).reduce((a,b)=>a+(b.amount||0),0);
   },0);
@@ -1020,12 +1103,53 @@ async function deleteProduct(id) {
 
 // ══ DAY CLOSE ══
 async function openDayClose() {
-  const {data}=await db.from('expenses').select('*').eq('date',todayStr());
-  if(data) dayExpenses=data.map(e=>({id:e.id,type:e.type,name:e.name,amount:e.amount}));
+  if (hasWorkDay()) await reloadExpenses();
   renderDayClose(); openModal('dayCloseOverlay');
 }
+function renderWorkDayStatus() {
+  const box=document.getElementById('workDayStatus');
+  const startBtn=document.getElementById('startDayBtn');
+  const finishBtn=document.getElementById('finishDayBtn');
+  if(!box) return;
+  if(hasWorkDay()) {
+    box.innerHTML=`
+      <div class="dcs-row"><span>Статус</span><span class="dcs-green">День начат</span></div>
+      <div class="dcs-row"><span>Рабочий день</span><span>${fmtDateHuman(workDayDate())}</span></div>
+      <div class="dcs-row"><span>Начат</span><span>${fmtDateTimeHuman(S.workDay.startedAt)}</span></div>`;
+  } else {
+    box.innerHTML=`
+      <div class="dcs-row"><span>Статус</span><span class="dcs-red">День не начат</span></div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.4;margin-top:6px">Нажмите «Начать день», и все продажи/расходы будут записываться в один рабочий день до кнопки «Завершить день».</div>`;
+  }
+  if(startBtn) startBtn.style.display=hasWorkDay()?'none':'block';
+  if(finishBtn) finishBtn.style.display=hasWorkDay()?'block':'none';
+}
+async function startWorkDay() {
+  if(hasWorkDay()){toast('Рабочий день уже начат');return;}
+  S.workDay={id:todayStr(),startedAt:new Date().toISOString(),seller:S.seller,sellerLabel:S.sellerLabel};
+  saveWorkDayState();
+  await reloadOrders();
+  await reloadExpenses();
+  renderAll(); renderDayClose();
+  toast(`☀️ Рабочий день начат: ${fmtDateHuman(workDayDate())}`);
+}
+async function finishWorkDay() {
+  if(!hasWorkDay()){toast('Рабочий день не начат');return;}
+  if(S.openOrders.length){
+    toast('Закройте открытые заказы перед завершением');
+    closeModal('dayCloseOverlay'); showPage('orders');
+    return;
+  }
+  const oldLabel=fmtDateHuman(workDayDate());
+  downloadReport(true,{allowEmpty:true});
+  clearWorkDayState();
+  S.closedOrders=[]; S.openOrders=[]; dayExpenses=[];
+  renderAll(); renderDayClose(); closeModal('dayCloseOverlay');
+  toast(`🌙 Рабочий день ${oldLabel} завершён`);
+}
 function renderDayClose() {
-  const cl=S.closedOrders.filter(o=>o.date===todayStr());
+  renderWorkDayStatus();
+  const cl=getClosedWorkOrders();
   const rev=cl.reduce((s,o)=>s+o.total,0);
   const sp=(t)=>cl.reduce((s,o)=>s+(o.payments||[{type:o.payType,amount:o.total}]).filter(p=>p.type===t).reduce((a,b)=>a+(b.amount||0),0),0);
   document.getElementById('dcsSummary').innerHTML=`
@@ -1045,11 +1169,12 @@ function renderDayClose() {
     <div class="dcs-row total"><span>Чистая прибыль</span><span style="color:${net>=0?'var(--accent2)':'var(--accent)'};font-weight:700">${fmtN(net)} сум</span></div>`;
 }
 async function addExpense() {
+  if(!ensureWorkDay()) return;
   const type=document.getElementById('expType').value;
   const name=document.getElementById('expName').value.trim();
   const amount=parseInt(document.getElementById('expAmount').value)||0;
   if(!name||!amount){toast('Заполните описание и сумму');return;}
-  const {data,error}=await db.from('expenses').insert([{type,name,amount,date:todayStr()}]).select();
+  const {data,error}=await db.from('expenses').insert([{type,name,amount,date:workDayDate()}]).select();
   if(error){toast('Ошибка ❌','var(--accent)');return;}
   dayExpenses.push({id:data[0].id,type,name,amount});
   document.getElementById('expName').value=''; document.getElementById('expAmount').value='';
@@ -1062,46 +1187,119 @@ async function removeExpense(idx) {
 }
 
 // ══ REPORT ══
-function downloadReport(withExp) {
-  const today=todayStr();
-  const cl=S.closedOrders.filter(o=>o.date===today);
-  if(!cl.length){toast('Нет продаж за сегодня');return;}
-  const pL={cash:'Наличные',card:'Карта',qr:'QR',open:'Открыт'};
-  const eL={salary:'Зарплата',purchase:'Закупка',force:'Форс-мажор',other:'Прочее'};
-  let rows=[['#','Время','Продавец','Товары','Сумма (сум)','Оплата']];
+function paymentLabel(t) { return {cash:'Наличные',card:'Карта',qr:'QR',open:'Открыт'}[t] || t || '—'; }
+function expenseLabel(t) { return {salary:'Зарплата',purchase:'Закупка',force:'Форс-мажор',other:'Прочее'}[t] || t || 'Прочее'; }
+function paymentText(o) {
+  return (o.payments&&o.payments.length?o.payments:[{type:o.payType,amount:o.total}])
+    .map(p=>`${paymentLabel(p.type)}: ${fmtN(p.amount||0)}`).join(' + ');
+}
+function paymentSum(orders,t) {
+  return orders.reduce((s,o)=>s+(o.payments||[{type:o.payType,amount:o.total}]).filter(p=>p.type===t).reduce((a,b)=>a+(Number(b.amount)||0),0),0);
+}
+function itemReportLine(k,cnt) {
+  const [pid,sz]=k.split(':');
+  const p=S.products.find(x=>x.id==pid); if(!p) return null;
+  let price=p.price||0, size='';
+  if(sz==='mini'){size='Мини';price=p.priceMini||0;}
+  if(sz==='std'){size='Стандарт';price=p.priceStd||0;}
+  return {cat:p.cat,name:p.name,size,qty:Number(cnt)||0,price,sum:(Number(price)||0)*(Number(cnt)||0)};
+}
+function setRowValues(row,startCol,vals){ vals.forEach((v,i)=>row[startCol+i]=v); }
+function buildReportRows(withExp, opts={}) {
+  const day=workDayDate();
+  const cl=getClosedWorkOrders().slice().sort((a,b)=>(a.num||0)-(b.num||0));
+  const expenses=withExp?dayExpenses:[];
+  const left=[], right=[];
+  const summary={};
   cl.forEach(o=>{
-    const it=Object.entries(o.items).filter(([,c])=>c>0).map(([k,cnt])=>{
-      const [pid,sz]=k.split(':');const p=S.products.find(x=>x.id==pid);if(!p)return '';
-      return `${p.name}${sz==='mini'?' (мини)':sz==='std'?' (ст.)':''} x${cnt}`;
-    }).filter(Boolean).join('; ');
-    const pt=(o.payments||[{type:o.payType,amount:o.total}]).map(p=>`${pL[p.type]||p.type}: ${fmtN(p.amount||0)}`).join(' + ');
-    rows.push([o.num,o.time,o.sellerLabel||'—',it,o.total,pt]);
+    Object.entries(o.items||{}).filter(([,c])=>c>0).forEach(([k,cnt])=>{
+      const line=itemReportLine(k,cnt); if(!line) return;
+      const row=[o.num,line.name,line.size,line.qty,line.sum,paymentText(o)];
+      (line.cat==='trdelnyk'?left:right).push(row);
+      const sk=[line.cat,line.name,line.size].join('|');
+      if(!summary[sk]) summary[sk]={cat:CAT[line.cat]||line.cat,name:line.name,size:line.size,qty:0,sum:0};
+      summary[sk].qty+=line.qty; summary[sk].sum+=line.sum;
+    });
   });
-  const rev=cl.reduce((s,o)=>s+o.total,0);
-  const sp=(t)=>cl.reduce((s,o)=>s+(o.payments||[{type:o.payType,amount:o.total}]).filter(p=>p.type===t).reduce((a,b)=>a+(b.amount||0),0),0);
-  rows.push([],[`ИТОГО за ${today}`]);
-  rows.push(['Наличные','','','',sp('cash'),''],['Карта','','','',sp('card'),''],['QR','','','',sp('qr'),''],['Выручка','','','',rev,'']);
-  if(withExp&&dayExpenses.length){
-    rows.push([],['РАСХОДЫ'],['Тип','Описание','','Сумма','','']);
-    dayExpenses.forEach(e=>rows.push([eL[e.type]||e.type,e.name,'',e.amount,'','']));
-    const et=dayExpenses.reduce((s,e)=>s+e.amount,0);
-    rows.push(['Расходы итого','','',et,'',''],['Чистая прибыль','','',rev-et,'','']);
+  const rev=cl.reduce((s,o)=>s+(Number(o.total)||0),0);
+  const expTotal=expenses.reduce((s,e)=>s+(Number(e.amount)||0),0);
+  const maxRows=Math.max(left.length,right.length,expenses.length,1);
+  const rows=[];
+  rows.push(['TRENDO — ОТЧЁТ ЗА РАБОЧИЙ ДЕНЬ']);
+  rows.push(['Рабочий день',fmtDateHuman(day),'Начат',fmtDateTimeHuman(S.workDay?.startedAt),'Сформирован',fmtDateTimeHuman(new Date().toISOString()),'', 'Продавец сейчас', S.sellerLabel||'—']);
+  rows.push([]);
+  rows.push(['ТРДЕЛЬНИКИ','','','','','', '', 'НАПИТКИ / ПРОЧЕЕ','','','','','', '', 'РАСХОДЫ','']);
+  rows.push(['№ заказа','Товар','Размер','Кол-во','Сумма','Оплата','', '№ заказа','Товар','Размер','Кол-во','Сумма','Оплата','', 'Описание','Сумма']);
+  for(let i=0;i<maxRows;i++){
+    const r=new Array(16).fill('');
+    if(left[i]) setRowValues(r,0,left[i]);
+    if(right[i]) setRowValues(r,7,right[i]);
+    if(expenses[i]) setRowValues(r,14,[`${expenseLabel(expenses[i].type)} · ${expenses[i].name}`, Number(expenses[i].amount)||0]);
+    rows.push(r);
   }
-  const ps={};
-  cl.forEach(o=>Object.entries(o.items).filter(([,c])=>c>0).forEach(([k,cnt])=>{
-    const [pid,sz]=k.split(':');const p=S.products.find(x=>x.id==pid);if(!p)return;
-    let name=p.name,price=p.price||0;
-    if(sz==='mini'){name+=' (мини)';price=p.priceMini||0;}
-    if(sz==='std'){name+=' (ст.)';price=p.priceStd||0;}
-    if(!ps[name])ps[name]={cnt:0,sum:0};
-    ps[name].cnt+=cnt;ps[name].sum+=price*cnt;
-  }));
-  rows.push([],['ПРОДАЖИ ПО ТОВАРАМ'],['Товар','Кол-во','','Сумма','','']);
-  Object.entries(ps).forEach(([n,{cnt,sum}])=>rows.push([n,cnt,'',sum,'','']));
-  const csv='\uFEFF'+rows.map(r=>r.join('\t')).join('\n');
-  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`trendo_${today}.csv`;a.click();
+  const leftQty=left.reduce((s,r)=>s+(Number(r[3])||0),0), leftSum=left.reduce((s,r)=>s+(Number(r[4])||0),0);
+  const rightQty=right.reduce((s,r)=>s+(Number(r[3])||0),0), rightSum=right.reduce((s,r)=>s+(Number(r[4])||0),0);
+  rows.push(['ИТОГО','', '', leftQty,leftSum,'','', 'ИТОГО','', '', rightQty,rightSum,'','', 'ИТОГО',expTotal]);
+  rows.push([]);
+  rows.push(['ИТОГИ ОПЛАТЫ']);
+  rows.push(['Наличные',paymentSum(cl,'cash')]);
+  rows.push(['Карта',paymentSum(cl,'card')]);
+  rows.push(['QR',paymentSum(cl,'qr')]);
+  rows.push(['Выручка',rev]);
+  rows.push(['Расходы',expTotal]);
+  rows.push(['Чистая прибыль',rev-expTotal]);
+  rows.push([]);
+  rows.push(['ПО ПРОДАВЦАМ']);
+  rows.push(['Продавец','Заказов','Сумма']);
+  ['renata','farukh'].forEach(s=>{
+    const so=cl.filter(o=>o.seller===s);
+    rows.push([s==='renata'?'Рената':'Фарух',so.length,so.reduce((a,b)=>a+(Number(b.total)||0),0)]);
+  });
+  rows.push([]);
+  rows.push(['ПРОДАЖИ ПО ТОВАРАМ']);
+  rows.push(['Категория','Товар','Размер','Кол-во','Сумма']);
+  Object.values(summary).sort((a,b)=>(a.cat+a.name+a.size).localeCompare(b.cat+b.name+b.size,'ru')).forEach(x=>rows.push([x.cat,x.name,x.size,x.qty,x.sum]));
+  return {rows,hasData:cl.length>0 || expenses.length>0 || opts.allowEmpty,day,rev,expTotal};
+}
+function sheetSafeName(name){ return String(name||'Отчёт').replace(/[\\/?*\[\]:]/g,' ').slice(0,31) || 'Отчёт'; }
+function downloadHtmlExcel(rows,filename){
+  const esc=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const html='\uFEFF<html><head><meta charset="UTF-8"><style>table{border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px}td{border:1px solid #444;padding:4px 6px;vertical-align:top}.title{font-weight:bold;font-size:18px;background:#f5e8e4}.head{font-weight:bold;background:#eee}</style></head><body><table>'+rows.map((r,i)=>'<tr>'+Array.from({length:16},(_,c)=>`<td class="${i===0?'title':(i===3||i===4?'head':'')}">${esc(r[c])}</td>`).join('')+'</tr>').join('')+'</table></body></html>';
+  const blob=new Blob([html],{type:'application/vnd.ms-excel;charset=utf-8;'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename.replace(/\.xlsx$/i,'.xls');a.click();
+}
+function downloadReport(withExp, opts={}) {
+  if(!hasWorkDay() && !opts.allowEmpty){toast('Сначала нажмите «Начать день»');openDayClose();return false;}
+  const report=buildReportRows(withExp,opts);
+  if(!report.hasData){toast('Нет данных за рабочий день');return false;}
+  const fname=`trendo_${report.day}.xlsx`;
+  try{
+    if(!window.XLSX) throw new Error('XLSX library is not loaded');
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.aoa_to_sheet(report.rows);
+    ws['!cols']=[{wch:10},{wch:28},{wch:12},{wch:10},{wch:14},{wch:26},{wch:3},{wch:10},{wch:28},{wch:12},{wch:10},{wch:14},{wch:26},{wch:3},{wch:30},{wch:14}];
+    ws['!merges']=[
+      {s:{r:0,c:0},e:{r:0,c:15}},
+      {s:{r:3,c:0},e:{r:3,c:5}},
+      {s:{r:3,c:7},e:{r:3,c:12}},
+      {s:{r:3,c:14},e:{r:3,c:15}}
+    ];
+    const range=XLSX.utils.decode_range(ws['!ref']);
+    for(let R=0;R<=range.e.r;R++){
+      for(let C=0;C<=range.e.c;C++){
+        const addr=XLSX.utils.encode_cell({r:R,c:C});
+        const cell=ws[addr];
+        if(cell&&typeof cell.v==='number') cell.z='#,##0';
+      }
+    }
+    XLSX.utils.book_append_sheet(wb,ws,sheetSafeName('Отчёт'));
+    XLSX.writeFile(wb,fname);
+  }catch(e){
+    console.error(e);
+    downloadHtmlExcel(report.rows,fname);
+  }
   toast('📥 Отчёт скачан!');
+  return true;
 }
 
 function toast(msg,bg){
